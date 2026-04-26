@@ -229,14 +229,12 @@ static size_t writefunc(const void *ptr,
 }
 
 
-static int cmd_sync(struct re_printf *pf, void *arg)
+static int carddav_sync(void)
 {
 	struct carddav_context context = {0};
 	char user[1024] = {0};
 	char url[4096] = {0};
 	char gateway[256] = {0};
-	(void)pf;
-	(void)arg;
 
 	if (conf_get_str(conf_cur(), "carddav_gateway",
 	                 gateway, sizeof(gateway)) ||
@@ -321,6 +319,14 @@ static int cmd_sync(struct re_printf *pf, void *arg)
 }
 
 
+static int cmd_sync(struct re_printf *pf, void *arg) {
+	(void)pf;
+	(void)arg;
+
+	return carddav_sync();
+}
+
+
 static const struct cmd cmdv[] = {
 	{"refreshcontacts", 0, 0, "Refresh contacts from carddav", cmd_sync},
 };
@@ -329,6 +335,15 @@ static const struct cmd cmdv[] = {
 static int module_init(void)
 {
 	int err = cmd_register(baresip_commands(), cmdv, RE_ARRAY_SIZE(cmdv));
+
+	if (err)
+		return err;
+
+	bool at_boot=false;
+	conf_get_bool(conf_cur(), "carddav_at_boot", &at_boot);
+	if (at_boot)
+		carddav_sync();
+
 	return err;
 }
 
