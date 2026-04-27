@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <curl/curl.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
@@ -46,6 +47,8 @@ struct carddav_context
 	char * buf_a;
 	char * buf_b;
 	char * gateway;
+	const char * user;
+	const char * url;
 	unsigned count;
 };
 
@@ -107,7 +110,7 @@ static int process_card(const char * cardstart,
 			struct pl pl;
 			unsigned len = re_snprintf(addr,
 			                           sizeof(addr),
-			                           "\"%s\" <sip:",
+			                           "\"%s (CardDAV)\" <sip:",
 			                           name);
 			++pos;
 			unsigned hascode=0;
@@ -229,6 +232,199 @@ static size_t writefunc(const void *ptr,
 }
 
 
+static void move_contacts(struct list * contacts_a,
+                          struct list * contacts_b,
+                          struct contacts * contacts)
+{
+	info("carddav: wipe existing contacts.\n");
+	struct le * cur = list_head(contacts_a);
+
+	while (cur) {
+		struct le * next = cur->next;
+		mem_ref(cur->data);
+		contact_remove(contacts, cur->data);
+		if (contacts_b)
+			list_prepend(contacts_b, cur, cur->data);
+		cur = next;
+	}
+}
+
+
+static size_t read_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+	char **pos = userdata;
+
+	unsigned remaining = strlen(*pos);
+	unsigned count = MIN(remaining, size*nmemb);
+
+	str_ncpy(ptr, *pos, count);
+	*pos += count;
+	return count;
+}
+
+
+static void upload(struct carddav_context * context)
+{
+	CURL *curl = curl_easy_init();
+	if (curl) {
+		int num = rand();
+
+		re_snprintf(context->buf_b,
+		            context->buf_len,
+		            "%s/%06d.vcf",
+		            context->url,
+		            num % 1000000);
+
+		curl_easy_setopt(curl, CURLOPT_URL, context->buf_b);
+		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+		curl_easy_setopt(curl, CURLOPT_USERPWD, context->user);
+
+		unsigned len = strlen(context->buf_a);
+
+		char slen[128];
+		re_snprintf(slen, sizeof(slen), "Content-Length: %u", len);
+
+		struct curl_slist *hs;
+		hs = curl_slist_append(NULL, "Content-Type: text/vcf");
+		hs = curl_slist_append(hs, slen);
+
+		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hs);
+		curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+
+		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+
+		char * pos = context->buf_a;
+
+		curl_easy_setopt(curl, CURLOPT_INFILESIZE, (long)len);
+		curl_easy_setopt(curl, CURLOPT_READDATA, &pos);
+		curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_cb);
+		/*curl_easy_setopt(curl, CURLOPT_POSTFIELDS, context->buf_a);*/
+
+		CURLcode result = curl_easy_perform(curl);
+		if (result == CURLE_OK)
+			debug("carddav: Uploaded.\n");
+		else
+			warning("carddav: Upload failed: %s\n",
+			        curl_easy_strerror(result));
+	}
+}
+
+
+static void upload_phone_contact(struct carddav_context * context,
+                                 const char * name,
+                                 const char * phonenumber)
+{
+	re_snprintf(context->buf_a,
+	            context->buf_len,
+	            "BEGIN:VCARD\n"
+	            "VERSION:3.0\n"
+	            "FN:%s\n"
+	            "TEL;%s\n"
+	            "END:VCARD\n\n",
+	            name, phonenumber);
+
+	upload(context);
+}
+
+
+static void upload_sip_contact(struct carddav_context * context,
+                               const char * name,
+                               const char * uri)
+{
+/* IMPP:sip:johndoe@aol.com */
+
+	re_snprintf(context->buf_a,
+	            context->buf_len,
+	            "BEGIN:VCARD\n"
+	            "VERSION:3.0\n"
+	            "FN:%s\n"
+	            "IMPP;%s\n"
+	            "END:VCARD\n\n",
+	            name, uri);
+
+	upload(context);
+}
+
+
+static void extract_name(char name[64], const char * con_str)
+{
+	const char * pos = con_str + 1;
+	const char * end = strchr(pos, '"');
+	unsigned len = PTRDIFF(end, pos) + 1;
+	str_ncpy(name, pos, len);
+}
+
+
+static void upload_unique(struct carddav_context * context,
+                          struct list * contacts_org,
+                          bool just_restore)
+{
+	struct contacts *contacts = context->contacts;
+	for(struct le * cur = list_head(contacts_org);
+	    cur;
+	    cur = cur->next) {
+		struct contact * con = (struct contact*)cur->data;
+		const char * con_str = contact_str(con);
+		struct pl pl;
+
+		if (!just_restore) {
+			const char * uri = contact_uri(con);
+
+			if (strstr(con_str, "(CardDAV)"))
+				continue;
+
+			struct contact  * dup = contact_find(contacts, uri);
+			if (dup)
+				continue;
+
+			const char * end = strchr(uri, '@');
+			if (!end)
+				warning("carddav: Contact URI %s, no @\n",
+				        uri);
+
+			const char * pos = uri;
+			if (strncmp(pos, "sip:", 4))
+				warning("carddav: Contact URI %s, no sip:\n",
+				        uri);
+
+			pos+=4;
+			while (end && pos < end) {
+				if (!isdigit(*pos)) {
+					info("carddav: Non-number URI %s\n",
+					     uri);
+					break;
+				}
+				++pos;
+			}
+
+			char name[64] = {0};
+			extract_name(name, con_str);
+			if (pos == end) {
+				unsigned len = PTRDIFF(end, uri) - 3;
+				char pn[16] = {0};
+				str_ncpy(pn, uri+4, len);
+
+				info("carddav: Push Name \"%s\" "
+				     "Phone number %s\n",
+				     name,  pn);
+				upload_phone_contact(context, name, pn);
+			}
+			else {
+				upload_sip_contact(context, name, uri);
+			}
+		}
+
+		pl_set_str(&pl, con_str);
+
+		info("carddav: Adding back %s\n", con_str);
+		int e = contact_add(contacts, NULL, &pl);
+		if (e)
+			warning("carddav: Failed to add back %s : %s\n",
+			        con_str, strerror(e));
+	}
+}
+
+
 static int carddav_sync(void)
 {
 	struct carddav_context context = {0};
@@ -242,7 +438,7 @@ static int carddav_sync(void)
 	                 user, sizeof(user)) ||
 	    conf_get_str(conf_cur(), "carddav_url",
 	                 url, sizeof(url))) {
-		warning("carddav: Missing config.\n");
+		warning("carddav: Miss⅞ing config.\n");
 		return EINVAL;
 	}
 
@@ -257,6 +453,8 @@ static int carddav_sync(void)
 	info("carddav: using buffer of: %u\n", context.buf_len);
 	context.contacts = baresip_contacts();
 	context.gateway = gateway;
+	context.url = url;
+	context.user = user;
 
 	CURLcode result = curl_global_init(CURL_GLOBAL_ALL);
 	if (result != CURLE_OK)
@@ -295,21 +493,35 @@ static int carddav_sync(void)
 		                 "</prop>"
 		                 "</propfind>");
 
+
+		struct list * contacts_list = contact_list(context.contacts);
+		struct list contacts_list_org;
+		list_init(&contacts_list_org);
+		move_contacts(contacts_list,
+		              &contacts_list_org,
+		              context.contacts);
+
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writefunc);
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &context);
-
-		info("carddav: wipe existing contacts.\n");
-		list_flush(contact_list(context.contacts));
-
 		result = curl_easy_perform(curl);
-		if (result != CURLE_OK)
-			warning("curl_easy_perform() failed: %s\n",
-			        curl_easy_strerror(result));
-		info("carddav: Added %u contacts.\n", context.count);
-		debug("carddav: curl complete.\n");
-
 		curl_easy_cleanup(curl);
+		if (result == CURLE_OK) {
+			info("carddav: Added %u contacts.\n", context.count);
+			debug("carddav: curl complete.\n");
+			upload_unique(&context, &contacts_list_org,
+			              false);
+			list_flush(&contacts_list_org);
+		}
+		else {
+			warning("carddav: Download failed: %s\n",
+			        curl_easy_strerror(result));
+			move_contacts(contacts_list, NULL, context.contacts);
+			upload_unique(&context, &contacts_list_org,
+			              true);
+			list_flush(&contacts_list_org);
+		}
 	}
+
 	curl_global_cleanup();
 
 	mem_deref(context.buf_a);
