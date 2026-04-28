@@ -250,19 +250,6 @@ static void move_contacts(struct list * contacts_a,
 }
 
 
-static size_t read_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
-{
-	char **pos = userdata;
-
-	unsigned remaining = strlen(*pos);
-	unsigned count = MIN(remaining, size*nmemb);
-
-	str_ncpy(ptr, *pos, count);
-	*pos += count;
-	return count;
-}
-
-
 static void upload(struct carddav_context * context)
 {
 	CURL *curl = curl_easy_init();
@@ -279,26 +266,13 @@ static void upload(struct carddav_context * context)
 		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 		curl_easy_setopt(curl, CURLOPT_USERPWD, context->user);
 
-		unsigned len = strlen(context->buf_a);
-
-		char slen[128];
-		re_snprintf(slen, sizeof(slen), "Content-Length: %u", len);
-
 		struct curl_slist *hs;
 		hs = curl_slist_append(NULL, "Content-Type: text/vcf");
-		hs = curl_slist_append(hs, slen);
 
 		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hs);
 		curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
 
-		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
-
-		char * pos = context->buf_a;
-
-		curl_easy_setopt(curl, CURLOPT_INFILESIZE, (long)len);
-		curl_easy_setopt(curl, CURLOPT_READDATA, &pos);
-		curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_cb);
-		/*curl_easy_setopt(curl, CURLOPT_POSTFIELDS, context->buf_a);*/
+		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, context->buf_a);
 
 		CURLcode result = curl_easy_perform(curl);
 		if (result == CURLE_OK)
@@ -319,8 +293,8 @@ static void upload_phone_contact(struct carddav_context * context,
 	            "BEGIN:VCARD\n"
 	            "VERSION:3.0\n"
 	            "FN:%s\n"
-	            "TEL;%s\n"
-	            "END:VCARD\n\n",
+	            "TEL;TYPE=cell:%s\n"
+	            "END:VCARD\n",
 	            name, phonenumber);
 
 	upload(context);
@@ -338,8 +312,8 @@ static void upload_sip_contact(struct carddav_context * context,
 	            "BEGIN:VCARD\n"
 	            "VERSION:3.0\n"
 	            "FN:%s\n"
-	            "IMPP;%s\n"
-	            "END:VCARD\n\n",
+	            "IMPP:%s\n"
+	            "END:VCARD\n",
 	            name, uri);
 
 	upload(context);
@@ -370,12 +344,19 @@ static void upload_unique(struct carddav_context * context,
 		if (!just_restore) {
 			const char * uri = contact_uri(con);
 
+			char name[64] = {0};
+			extract_name(name, con_str);
+
+			info("Checking : %s\n", con_str);
 			if (strstr(con_str, "(CardDAV)"))
 				continue;
 
-			struct contact  * dup = contact_find(contacts, uri);
+			info("Dup Checking : %s\n", uri);
+			struct contact  * dup = contact_find(contacts, name);
 			if (dup)
 				continue;
+
+			info("Dup Checked : %s\n", uri);
 
 			const char * end = strchr(uri, '@');
 			if (!end)
@@ -397,8 +378,6 @@ static void upload_unique(struct carddav_context * context,
 				++pos;
 			}
 
-			char name[64] = {0};
-			extract_name(name, con_str);
 			if (pos == end) {
 				unsigned len = PTRDIFF(end, uri) - 3;
 				char pn[16] = {0};
