@@ -292,7 +292,7 @@ static void upload(struct carddav_context * context, const char * name)
 			return;
 		}
 
-		for(unsigned n = 0; n < namelen; n++) {
+		for (unsigned n = 0; n < namelen; n++) {
 			char c = name[n];
 			if (isalnum(c))
 				context->buf_b[len++] = tolower(c);
