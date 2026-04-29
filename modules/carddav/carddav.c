@@ -112,68 +112,106 @@ static struct contact  * in_contacts(struct contacts * contacts,
 }
 
 
+static char * last_column(char * s)
+{
+	unsigned len = strlen(s);
+	while (len) {
+		char c = s[--len];
+		if (c == ';' || c == ':')
+			return s + len;
+	}
+
+	return NULL;
+}
+
+
 static int process_card(const char * cardstart,
                          uintptr_t cardend,
                          struct carddav_context * context)
 {
 	char name[512] = {0};
 	char tel[512] = {0};
+	char addr[1024] = {0};
+
 	if (!get_vcard_attr(cardstart, cardend, "\nFN", name))
 		return EINVAL;
-	if (!get_vcard_attr(cardstart, cardend, "\nTEL", tel))
+
+	if (get_vcard_attr(cardstart, cardend, "\nIMPP", tel)) {
+		char * pos = last_column(tel);
+		if (!pos)
+			return EINVAL;
+		pos -= 3;
+		if (pos < tel) {
+			debug("carddav: Broken IMPP for %s\n", name);
+			return EINVAL;
+		}
+
+		if (!strncmp(pos, "SIP:", 4) || !strncmp(pos, "sip:", 4))
+		{
+			pos[0]=tolower(pos[0]);
+			pos[1]=tolower(pos[1]);
+			pos[2]=tolower(pos[2]);
+			debug("carddav: SIP IMPP <%s>\n", pos);
+			re_snprintf(addr,
+				   sizeof(addr),
+				   "\"%s (CardDAV)\" <%s>",
+				   name, pos);
+		}
+		else debug("carddav: Non-SIP IMPP %s\n", tel);
+	}
+
+	if (!addr[0] && get_vcard_attr(cardstart, cardend, "\nTEL", tel)) {
+		const char * pos = last_column(tel);
+		if (!pos)
+			return EINVAL;
+		unsigned len = re_snprintf(addr,
+		                           sizeof(addr),
+		                           "\"%s (CardDAV)\" <sip:",
+		                           name);
+		unsigned hascode=0;
+
+		while (*pos) {
+			char c = *pos++;
+
+			if ( c == '+') {
+				addr[len++]='0';
+				++hascode;
+			}
+			else if (isdigit(c)) {
+				if (hascode==1) {
+					addr[len++]='0';
+					hascode=0;
+				}
+				else if (hascode>2) {
+					len-=(hascode-2);
+					hascode=0;
+				}
+				addr[len++]=c;
+			}
+		}
+
+		re_snprintf(addr+len, sizeof(addr)-len,
+			    "@%s>", context->gateway);
+	}
+
+	if (!addr[0])
 		return EINVAL;
 
-	unsigned long pos = strlen(tel);
-	while (pos) {
-		if (tel[pos] == ':' || tel[pos] == ':') {
-			char addr[1024] = {0};
-			struct pl pl;
-			unsigned len = re_snprintf(addr,
-			                           sizeof(addr),
-			                           "\"%s (CardDAV)\" <sip:",
-			                           name);
-			++pos;
-			unsigned hascode=0;
-			while (tel[pos]) {
-				char c = tel[pos++];
-
-				if ( c == '+') {
-					addr[len++]='0';
-					++hascode;
-				}
-				else if (isdigit(c)) {
-					if (hascode==1) {
-						addr[len++]='0';
-						hascode=0;
-					}
-					else if (hascode>2) {
-						len-=(hascode-2);
-						hascode=0;
-					}
-					addr[len++]=c;
-				}
-			}
-			re_snprintf(addr+len, sizeof(addr)-len,
-			            "@%s>", context->gateway);
-
-			if (in_contacts(context->contacts, addr)) {
-				info("carddav: Duplicate SIP %s\n", addr);
-				return 0;
-			}
-
-			pl_set_str(&pl, addr);
-
-			info("carddav: Adding %s\n", addr);
-			int e = contact_add(context->contacts, NULL, &pl);
-			if (!e)
-				context->count++;
-			else
-				warning("carddav: Failed to add contact.\n");
-			return e;
-		}
-		--pos;
+	if (in_contacts(context->contacts, addr)) {
+		info("carddav: Duplicate SIP %s\n", addr);
+		return 0;
 	}
-	return EINVAL;
+
+	struct pl pl;
+	pl_set_str(&pl, addr);
+
+	info("carddav: Adding %s\n", addr);
+	int e = contact_add(context->contacts, NULL, &pl);
+	if (!e)
+		context->count++;
+	else
+		warning("carddav: Failed to add contact.\n");
+	return e;
 }
 
 
@@ -346,16 +384,20 @@ static void upload_sip_contact(struct carddav_context * context,
                                const char * name,
                                const char * uri)
 {
-/* IMPP:sip:johndoe@aol.com */
+/*
+  Good note:
+  https://github.com/basepeak/roundcube-carddav/blob/main/doc/devdoc/IMPP.md
+  IMPP;TYPE=SIP:johndoe@aol.com
+*/
 
 	re_snprintf(context->buf_a,
 	            context->buf_len,
 	            "BEGIN:VCARD\n"
 	            "VERSION:3.0\n"
 	            "FN:%s\n"
-	            "IMPP:%s\n"
+	            "IMPP;TYPE=SIP:%s\n"
 	            "END:VCARD\n",
-	            name, uri);
+	            name, uri + 4);
 
 	upload(context, name);
 }
