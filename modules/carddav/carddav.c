@@ -92,6 +92,26 @@ static bool get_vcard_attr(const char * cardstart,
 }
 
 
+static struct contact  * in_contacts(struct contacts * contacts,
+                                     const char * uri)
+{
+	struct pl pl;
+	struct sip_addr addr;
+
+	pl_set_str(&pl, uri);
+
+	int err = sip_addr_decode(&addr, &pl);
+	if (err)
+		return NULL;
+
+	char safe[128] = {0};
+
+	str_ncpy(safe, addr.auri.p, addr.auri.l + 1);
+
+	return contact_find(contacts, safe);
+}
+
+
 static int process_card(const char * cardstart,
                          uintptr_t cardend,
                          struct carddav_context * context)
@@ -116,6 +136,7 @@ static int process_card(const char * cardstart,
 			unsigned hascode=0;
 			while (tel[pos]) {
 				char c = tel[pos++];
+
 				if ( c == '+') {
 					addr[len++]='0';
 					++hascode;
@@ -135,7 +156,13 @@ static int process_card(const char * cardstart,
 			re_snprintf(addr+len, sizeof(addr)-len,
 			            "@%s>", context->gateway);
 
+			if (in_contacts(context->contacts, addr)) {
+				info("Duplicate SIP %s\n", addr);
+				return 0;
+			}
+
 			pl_set_str(&pl, addr);
+
 			info("carddav: Adding %s\n", addr);
 			int e = contact_add(context->contacts, NULL, &pl);
 			if (!e)
@@ -334,7 +361,8 @@ static void upload_unique(struct carddav_context * context,
                           bool just_restore)
 {
 	struct contacts *contacts = context->contacts;
-	for(struct le * cur = list_head(contacts_org);
+
+	for (struct le * cur = list_head(contacts_org);
 	    cur;
 	    cur = cur->next) {
 		struct contact * con = (struct contact*)cur->data;
@@ -347,16 +375,21 @@ static void upload_unique(struct carddav_context * context,
 			char name[64] = {0};
 			extract_name(name, con_str);
 
-			info("Checking : %s\n", con_str);
+			re_snprintf(context->buf_a,
+			            context->buf_len,
+			            "%s %s", name, uri);
+
 			if (strstr(con_str, "(CardDAV)"))
 				continue;
 
-			info("Dup Checking : %s\n", uri);
-			struct contact  * dup = contact_find(contacts, name);
+			if (in_contacts(context->contacts, uri)) {
+				info("Found \"%s\", not adding.\n", uri);
+				continue;
+			}
+
+			struct contact  * dup = contact_find(contacts, uri);
 			if (dup)
 				continue;
-
-			info("Dup Checked : %s\n", uri);
 
 			const char * end = strchr(uri, '@');
 			if (!end)
