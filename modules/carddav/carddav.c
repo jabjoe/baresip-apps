@@ -157,7 +157,7 @@ static int process_card(const char * cardstart,
 			            "@%s>", context->gateway);
 
 			if (in_contacts(context->contacts, addr)) {
-				info("Duplicate SIP %s\n", addr);
+				info("carddav: Duplicate SIP %s\n", addr);
 				return 0;
 			}
 
@@ -277,17 +277,31 @@ static void move_contacts(struct list * contacts_a,
 }
 
 
-static void upload(struct carddav_context * context)
+static void upload(struct carddav_context * context, const char * name)
 {
 	CURL *curl = curl_easy_init();
 	if (curl) {
-		int num = rand();
+		unsigned len = re_snprintf(context->buf_b,
+		                           context->buf_len,
+		                           "%s/",
+		                           context->url);
+		unsigned namelen = strlen(name);
 
-		re_snprintf(context->buf_b,
-		            context->buf_len,
-		            "%s/%06d.vcf",
-		            context->url,
-		            num % 1000000);
+		if (len + namelen + 5 > context->buf_len) {
+			warning("carddav: buffer to small for upload!\n");
+			return;
+		}
+
+		for(unsigned n = 0; n < namelen; n++) {
+			char c = name[n];
+			if (isalnum(c))
+				context->buf_b[len++] = tolower(c);
+			else
+				context->buf_b[len++] = '_';
+		}
+
+		str_ncpy(&context->buf_b[len], ".vcf", context->buf_len - len);
+		debug("carddav: uploading %s\n", context->buf_b);
 
 		curl_easy_setopt(curl, CURLOPT_URL, context->buf_b);
 		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
@@ -324,7 +338,7 @@ static void upload_phone_contact(struct carddav_context * context,
 	            "END:VCARD\n",
 	            name, phonenumber);
 
-	upload(context);
+	upload(context, name);
 }
 
 
@@ -343,7 +357,7 @@ static void upload_sip_contact(struct carddav_context * context,
 	            "END:VCARD\n",
 	            name, uri);
 
-	upload(context);
+	upload(context, name);
 }
 
 
@@ -372,13 +386,6 @@ static void upload_unique(struct carddav_context * context,
 		if (!just_restore) {
 			const char * uri = contact_uri(con);
 
-			char name[64] = {0};
-			extract_name(name, con_str);
-
-			re_snprintf(context->buf_a,
-			            context->buf_len,
-			            "%s %s", name, uri);
-
 			if (strstr(con_str, "(CardDAV)"))
 				continue;
 
@@ -392,14 +399,18 @@ static void upload_unique(struct carddav_context * context,
 				continue;
 
 			const char * end = strchr(uri, '@');
-			if (!end)
+			if (!end) {
 				warning("carddav: Contact URI %s, no @\n",
 				        uri);
+				continue;
+			}
 
 			const char * pos = uri;
-			if (strncmp(pos, "sip:", 4))
+			if (strncmp(pos, "sip:", 4)) {
 				warning("carddav: Contact URI %s, no sip:\n",
 				        uri);
+				continue;
+			}
 
 			pos+=4;
 			while (end && pos < end) {
@@ -410,6 +421,9 @@ static void upload_unique(struct carddav_context * context,
 				}
 				++pos;
 			}
+
+			char name[64] = {0};
+			extract_name(name, con_str);
 
 			if (pos == end) {
 				unsigned len = PTRDIFF(end, uri) - 3;
