@@ -317,10 +317,10 @@ static void upload(struct carddav_context * context, const char * name)
 
 		CURLcode result = curl_easy_perform(curl);
 		if (result == CURLE_OK)
-			debug("carddav: Uploaded.\n");
+			debug("carddav: Uploaded %s\n", name);
 		else
-			warning("carddav: Upload failed: %s\n",
-			        curl_easy_strerror(result));
+			warning("carddav: Upload %s failed: %s\n",
+			        name, curl_easy_strerror(result));
 	}
 }
 
@@ -390,7 +390,8 @@ static void upload_unique(struct carddav_context * context,
 				continue;
 
 			if (in_contacts(context->contacts, uri)) {
-				info("Found \"%s\", not adding.\n", uri);
+				debug("carddav: Found \"%s\", not adding.\n",
+				      uri);
 				continue;
 			}
 
@@ -415,8 +416,8 @@ static void upload_unique(struct carddav_context * context,
 			pos+=4;
 			while (end && pos < end) {
 				if (!isdigit(*pos)) {
-					info("carddav: Non-number URI %s\n",
-					     uri);
+					debug("carddav: Non-number URI %s\n",
+					      uri);
 					break;
 				}
 				++pos;
@@ -428,11 +429,24 @@ static void upload_unique(struct carddav_context * context,
 			if (pos == end) {
 				unsigned len = PTRDIFF(end, uri) - 3;
 				char pn[16] = {0};
+
 				str_ncpy(pn, uri+4, len);
 
-				info("carddav: Push Name \"%s\" "
-				     "Phone number %s\n",
-				     name,  pn);
+				re_snprintf(context->buf_a,
+				            context->buf_len,
+				            "sip:%s@%s",
+				            pn, context->gateway);
+
+				dup = contact_find(contacts, context->buf_a);
+				if (dup) {
+					debug("carddav: Phone number %s"
+					      " already on gateway.\n", pn);
+					continue;
+				}
+
+				debug("carddav: Push Name \"%s\" "
+				      "Phone number %s\n",
+				      name,  pn);
 				upload_phone_contact(context, name, pn);
 			}
 			else {
