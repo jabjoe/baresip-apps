@@ -23,7 +23,7 @@
  *
  * App module add carddav commands using libcurl
  *
- * This module adds command to refresh contacts from a CardDAV.
+ * This module adds command to refresh contacts from a "(CardDAV)".
  *
  * Example config:
  \verbatim
@@ -51,6 +51,8 @@ struct carddav_context
 	const char * url;
 	unsigned count;
 };
+
+#define CARDDAV "(CardDAV)"
 
 
 static bool get_vcard_attr(const char * cardstart,
@@ -154,7 +156,7 @@ static int process_card(const char * cardstart,
 			debug("carddav: SIP IMPP <%s>\n", pos);
 			re_snprintf(addr,
 				   sizeof(addr),
-				   "\"%s (CardDAV)\" <%s>",
+				   "\"%s "CARDDAV"\" <%s>",
 				   name, pos);
 		}
 		else debug("carddav: Non-SIP IMPP %s\n", tel);
@@ -166,7 +168,7 @@ static int process_card(const char * cardstart,
 			return EINVAL;
 		unsigned len = re_snprintf(addr,
 		                           sizeof(addr),
-		                           "\"%s (CardDAV)\" <sip:",
+		                           "\"%s "CARDDAV"\" <sip:",
 		                           name);
 		unsigned hascode=0;
 
@@ -428,7 +430,7 @@ static void upload_unique(struct carddav_context * context,
 		if (!just_restore) {
 			const char * uri = contact_uri(con);
 
-			if (strstr(con_str, "(CardDAV)"))
+			if (strstr(con_str, CARDDAV))
 				continue;
 
 			if (in_contacts(context->contacts, uri)) {
@@ -497,7 +499,7 @@ static void upload_unique(struct carddav_context * context,
 
 			re_snprintf(context->buf_a,
 				    context->buf_len,
-				    "\"%s (CardDAV)\" <%s>",
+				    "\"%s "CARDDAV"\" <%s>",
 				    name, uri);
 
 			info("carddav: Adding as back %s\n", context->buf_a);
