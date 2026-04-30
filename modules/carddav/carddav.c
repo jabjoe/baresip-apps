@@ -518,12 +518,61 @@ static void upload_unique(struct carddav_context * context,
 }
 
 
+static int carddav_sync_instance(struct carddav_context * context)
+{
+	info("carddav: using URL: %s\n", context->url);
+	info("carddav: using user: %s\n", context->user);
+	info("carddav: using gateway: %s\n", context->gateway);
+
+	CURL *curl = curl_easy_init();
+	if (!curl) {
+		warning("carddav: curl easy init failed.\n");
+		return EINVAL;
+	}
+
+	curl_easy_setopt(curl, CURLOPT_URL, context->url);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(curl, CURLOPT_USERPWD, context->user);
+
+	struct curl_slist *hs;
+	hs = curl_slist_append(NULL, "Content-Type: text/xml");
+
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hs);
+
+	curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PROPFIND");
+
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS,
+		         "<propfind xmlns='DAV:'>"
+		         "<prop>"
+		         "<address-data "
+		         "xmlns=\"urn:ietf:params:xml:ns:carddav\"/>"
+		         "</prop>"
+		         "</propfind>");
+
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writefunc);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, context);
+
+	CURLcode result = curl_easy_perform(curl);
+	curl_easy_cleanup(curl);
+
+	if (result == CURLE_OK) {
+		info("carddav: Added %u contacts.\n", context->count);
+		debug("carddav: CardDAV pull complete.\n");
+	}
+	else
+		warning("carddav: CardDAV pull failed: %s\n",
+		        curl_easy_strerror(result));
+	return (int)result;
+}
+
+
 static int carddav_sync(void)
 {
-	struct carddav_context context = {0};
 	char user[1024] = {0};
 	char url[4096] = {0};
 	char gateway[256] = {0};
+
+	struct carddav_context context = {0};
 
 	if (conf_get_str(conf_cur(), "carddav_gateway",
 	                 gateway, sizeof(gateway)) ||
@@ -535,13 +584,9 @@ static int carddav_sync(void)
 		return EINVAL;
 	}
 
-	info("carddav: using URL: %s\n", url);
-	info("carddav: using user: %s\n", user);
-	info("carddav: using gateway: %s\n", gateway);
-
 	conf_get_u32(conf_cur(), "carddav_url", &context.buf_len);
 	if (!context.buf_used)
-		context.buf_len = 1024 * 32;
+		context.buf_len = 1024 * 128;
 
 	info("carddav: using buffer of: %u\n", context.buf_len);
 	context.contacts = baresip_contacts();
@@ -553,74 +598,83 @@ static int carddav_sync(void)
 	if (result != CURLE_OK)
 		return (int)result;
 
+	int e = 0;
+
 	context.buf_a = mem_zalloc(context.buf_len, NULL);
 	if (!context.buf_a) {
 		warning("carddav: Unable to allocate carddav buffer 1.\n");
-		return ENOMEM;
+		e = ENOMEM;
+		goto cleanup;
 	}
 	context.buf_b = mem_zalloc(context.buf_len, NULL);
 	if (!context.buf_b) {
 		warning("carddav: Unable to allocate carddav buffer 2.\n");
 		mem_deref(context.buf_a);
-		return ENOMEM;
+		e = ENOMEM;
+		goto cleanup;
 	}
 
-	CURL *curl = curl_easy_init();
-	if (curl) {
-		curl_easy_setopt(curl, CURLOPT_URL, url);
-		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-		curl_easy_setopt(curl, CURLOPT_USERPWD, user);
+	struct list * contacts_list = contact_list(context.contacts);
+	struct list contacts_list_org;
+	list_init(&contacts_list_org);
+	move_contacts(contacts_list,
+	              &contacts_list_org,
+	              context.contacts);
 
-		struct curl_slist *hs;
-		hs = curl_slist_append(NULL, "Content-Type: text/xml");
+	e = carddav_sync_instance(&context);
+	if (e)
+		goto bad;
 
-		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hs);
+	uint32_t extras = 0;
 
-		curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PROPFIND");
+	if (!conf_get_u32(conf_cur(), "carddav_extras", &extras))
+		info("carddav: Loading %"PRIu32" extra CardDAVs.\n", extras);
 
-		curl_easy_setopt(curl, CURLOPT_POSTFIELDS,
-		                 "<propfind xmlns='DAV:'>"
-		                 "<prop>"
-		                 "<address-data "
-		                 "xmlns=\"urn:ietf:params:xml:ns:carddav\"/>"
-		                 "</prop>"
-		                 "</propfind>");
+	for (uint32_t n = 1; n <= extras; n++) {
 
+		context.count = 0;
+		context.buf_used = 0;
 
-		struct list * contacts_list = contact_list(context.contacts);
-		struct list contacts_list_org;
-		list_init(&contacts_list_org);
-		move_contacts(contacts_list,
-		              &contacts_list_org,
-		              context.contacts);
+		debug("carddav: Loading extra %"PRIu32"\n", n);
+		re_snprintf(context.buf_a, context.buf_len,
+		            "carddav_%"PRIu32"_url", n);
 
-		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writefunc);
-		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &context);
-		result = curl_easy_perform(curl);
-		curl_easy_cleanup(curl);
-		if (result == CURLE_OK) {
-			info("carddav: Added %u contacts.\n", context.count);
-			debug("carddav: curl complete.\n");
-			upload_unique(&context, &contacts_list_org,
-			              false);
-			list_flush(&contacts_list_org);
+		if (conf_get_str(conf_cur(), context.buf_a,
+	                         url, sizeof(url))) {
+			warning("carddav: Failed to get %s\n", context.buf_a);
+			continue;
 		}
-		else {
-			warning("carddav: Download failed: %s\n",
-			        curl_easy_strerror(result));
-			move_contacts(contacts_list, NULL, context.contacts);
-			upload_unique(&context, &contacts_list_org,
-			              true);
-			list_flush(&contacts_list_org);
+
+		re_snprintf(context.buf_a, context.buf_len,
+		            "carddav_%"PRIu32"_user", n);
+
+		if (conf_get_str(conf_cur(), context.buf_a,
+	                         user, sizeof(user))) {
+			warning("carddav: Failed to get %s\n", context.buf_a);
+			continue;
 		}
+
+		carddav_sync_instance(&context);
 	}
 
+	upload_unique(&context, &contacts_list_org, false);
+	list_flush(&contacts_list_org);
+	goto cleanup;
+
+bad:
+	move_contacts(contacts_list, NULL, context.contacts);
+	upload_unique(&context, &contacts_list_org, true);
+	list_flush(&contacts_list_org);
+
+cleanup:
 	curl_global_cleanup();
 
-	mem_deref(context.buf_a);
-	mem_deref(context.buf_b);
+	if (context.buf_a)
+		mem_deref(context.buf_a);
+	if (context.buf_b)
+		mem_deref(context.buf_b);
 
-	return 0;
+	return e;
 }
 
 
