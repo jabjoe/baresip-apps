@@ -494,15 +494,24 @@ static void upload_unique(struct carddav_context * context,
 			else {
 				upload_sip_contact(context, name, uri);
 			}
+
+			re_snprintf(context->buf_a,
+				    context->buf_len,
+				    "\"%s (CardDAV)\" <%s>",
+				    name, uri);
+
+			info("carddav: Adding as back %s\n", context->buf_a);
+			pl_set_str(&pl, context->buf_a);
+		}
+		else {
+			info("carddav: Adding back %s\n", con_str);
+			pl_set_str(&pl, con_str);
 		}
 
-		pl_set_str(&pl, con_str);
-
-		info("carddav: Adding back %s\n", con_str);
 		int e = contact_add(contacts, NULL, &pl);
 		if (e)
-			warning("carddav: Failed to add back %s : %s\n",
-			        con_str, strerror(e));
+			warning("carddav: Failed to add back %.*s : %s\n",
+			        pl.l, pl.p, strerror(e));
 	}
 }
 
